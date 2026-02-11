@@ -50,11 +50,23 @@ def send_email(recipient, pdf_data, filename, name):
 
 st.set_page_config(page_title="📄 Resume Builder", layout="wide", page_icon="📄")
 
+def apply_suggested_skills() -> None:
+    """Copy the latest AI-suggested skills into the resume form."""
+    suggestion_data = st.session_state.get("skill_suggestions_data") or {}
+    formatted_skills = suggestion_data.get("formatted", "")
+    if formatted_skills:
+        st.session_state.f1_skills = formatted_skills
+        st.session_state.skills_used = True
+
 # Initialize session state for skills tracking
 if 'skills_used' not in st.session_state:
     st.session_state.skills_used = False
 if 'skill_suggestions_data' not in st.session_state:
     st.session_state.skill_suggestions_data = None
+if 'last_search_query' not in st.session_state:
+    st.session_state.last_search_query = ""
+if 'f1_skills' not in st.session_state:
+    st.session_state.f1_skills = ""
 
 # Initialize RAG
 if 'rag_initialized' not in st.session_state:
@@ -74,31 +86,37 @@ with col_search:
     )
 
 # Search and display suggestions
-if search_query:
-    with st.spinner("Getting AI-powered skill suggestions..."):
-        result = get_skill_suggestions(search_query)
-        st.session_state.skill_suggestions_data = result
-        
-        if result.get("skills"):
-            st.success("💡 **AI-Generated Skills:**")
-            
-            # Display skills in a nice format
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                # Display skills as tags
-                skills_html = ""
-                for skill in result["skills"]:
-                    skills_html += f'<span style="background-color: #e0e7ff; color: #3730a3; padding: 5px 10px; margin: 3px; border-radius: 15px; display: inline-block; font-size: 14px;">{skill}</span> '
-                st.markdown(skills_html, unsafe_allow_html=True)
-            
-            with col2:
-                if st.button("✨ Use These Skills", type="primary", use_container_width=True):
-                    # KEY FIX: Update the actual widget's session state key directly
-                    st.session_state.f1_skills = result["formatted"]
-                    st.session_state.skills_used = True
-                    st.rerun()  # Force immediate update
-        else:
-            st.error(result.get("text", "Could not generate suggestions"))
+if search_query and search_query != st.session_state.last_search_query:
+st.session_state.skill_suggestions_data = get_skill_suggestions(search_query)
+        st.session_state.last_search_query = search_query
+
+if not search_query:
+    st.session_state.skill_suggestions_data = None
+    st.session_state.last_search_query = ""
+
+result = st.session_state.skill_suggestions_data or {}
+if search_query and result:
+    if result.get("skills"):
+        st.success("💡 **AI-Generated Skills:**")
+
+        # Display skills in a nice format
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            # Display skills as tags
+            skills_html = ""
+            for skill in result["skills"]:
+                skills_html += f'<span style="background-color: #e0e7ff; color: #3730a3; padding: 5px 10px; margin: 3px; border-radius: 15px; display: inline-block; font-size: 14px;">{skill}</span> '
+            st.markdown(skills_html, unsafe_allow_html=True)
+
+        with col2:
+            st.button(
+                "✨ Use These Skills",
+                type="primary",
+                use_container_width=True,
+                on_click=apply_suggested_skills,
+            )
+    else:
+        st.error(result.get("text", "Could not generate suggestions"))
 
 st.divider()
 
