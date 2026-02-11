@@ -5,193 +5,265 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 from fpdf import FPDF
-from pydantic import ValidationError
+
 
 try:
-    from backend.main import ResumeData, generate_resume
+    from backend.main import ResumeData, generate_resume, get_skill_suggestions
     from backend.config import settings
+    from backend.rag import rag_service
 except ImportError:
-    from backend.main import ResumeData, generate_resume
+    from backend.main import ResumeData, generate_resume, get_skill_suggestions
     from backend.config import settings
-
+    from backend.rag import rag_service
 
 def create_pdf_safe(text):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.set_font("Helvetica", size=10)
-    
-    # Define effective width to avoid margin calculation errors
     effective_page_width = pdf.w - 2 * pdf.l_margin
+    for line in text.split("\n"):
+        if not line.strip():
+            pdf.ln(5)
+            continue
+        pdf.set_x(pdf.l_margin)
+        safe = line.encode('latin-1', 'replace').decode('latin-1')
+        pdf.multi_cell(effective_page_width, 5, safe)
+    return bytes(pdf.output())
 
-    for line_num, line in enumerate(text.split("\n"), 1):
-        try:
-            if not line.strip():
-                pdf.ln(5)
-                continue
-            
-            # CRITICAL FIX: Always reset X to the left margin for a new block
-            pdf.set_x(pdf.l_margin) 
-            
-            safe = line.encode('latin-1', 'replace').decode('latin-1')
-            
-            # Use multi_cell with a fixed width instead of 0 to prevent crashes
-            pdf.multi_cell(effective_page_width, 5, safe)
-            
-        except Exception as e:
-            return None, line_num, f"{str(e)}: {line[:50]}"
-            
-    return  bytes(pdf.output()), None, None
+def send_email(recipient, pdf_data, filename, name):
+    msg = MIMEMultipart()
+    msg['From'] = settings.SENDER_EMAIL
+    msg['To'] = recipient
+    msg['Subject'] = f"Resume - {name}"
+    msg.attach(MIMEText(f"Resume for {name}", 'plain'))
+    part = MIMEBase('application', 'octet-stream')
+    part.set_payload(pdf_data)
+    encoders.encode_base64(part)
+    part.add_header('Content-Disposition', f'attachment; filename={filename}')
+    msg.attach(part)
+    server = smtplib.SMTP(settings.SMTP_SERVER, settings.SMTP_PORT)
+    server.starttls()
+    server.login(settings.SENDER_EMAIL, settings.SENDER_PASSWORD)
+    server.send_message(msg)
+    server.quit()
 
+st.set_page_config(page_title="📄 Resume Builder", layout="wide", page_icon="📄")
 
-st.set_page_config(page_title="AI Resume Builder", layout="centered", page_icon="📄")
-st.title("📄 AI Resume Builder")
+# Initialize session state for skills tracking
+if 'skills_used' not in st.session_state:
+    st.session_state.skills_used = False
+if 'skill_suggestions_data' not in st.session_state:
+    st.session_state.skill_suggestions_data = None
 
-if 'resume_pdf' not in st.session_state:
-    st.session_state.resume_pdf = None
+# Initialize RAG
+if 'rag_initialized' not in st.session_state:
+    with st.spinner("Initializing AI..."):
+        st.session_state.rag_initialized = rag_service.initialize()
 
-option = st.radio("Type:", ["📝 Standard", "🎯 JD-Optimized"], horizontal=True)
-jd = st.text_area("📋 Job Description", height=100) if "JD" in option else None
+# Home Page with Search
+st.title("🚀 RAG-Powered Resume Builder")
 
-st.subheader("Personal Information")
-col1, col2 = st.columns(2)
-with col1:
-    name = st.text_input("Name*")
-    email = st.text_input("Email*")
-with col2:
-    phone = st.text_input("Phone*")
+# Skill Search with Use Button
+col_search, col_button = st.columns([4, 1])
+with col_search:
+    search_query = st.text_input(
+        "🔍 Search skills, keywords, or get suggestions...", 
+        placeholder="e.g., Python developer, Data Scientist, Frontend Engineer",
+        key="search_input"
+    )
 
-summary = st.text_area("Summary*", height=80)
-skills = st.text_area("Skills*", height=60)
-
-st.subheader("Experience")
-exp_count = st.number_input("Number of experiences", 0, 5, 1)
-experiences, exp_errors = [], []
-
-for i in range(exp_count):
-    with st.expander(f"Experience {i+1}", expanded=(i==0)):
-        col1, col2 = st.columns(2)
-        with col1:
-            company = st.text_input("Company", key=f"co_{i}")
-            role = st.text_input("Role", key=f"role_{i}")
-        with col2:
-            duration = st.text_input("Duration", key=f"dur_{i}")
-        details = st.text_area("Details", key=f"det_{i}", height=60)
+# Search and display suggestions
+if search_query:
+    with st.spinner("Getting AI-powered skill suggestions..."):
+        result = get_skill_suggestions(search_query)
+        st.session_state.skill_suggestions_data = result
         
-        if any([company, role, duration, details]):
-            missing = []
-            if not company: missing.append("Company")
-            if not role: missing.append("Role")
-            if not duration: missing.append("Duration")
+        if result.get("skills"):
+            st.success("💡 **AI-Generated Skills:**")
             
-            if missing:
-                st.error(f"🔴 Experience {i+1}: Missing {', '.join(missing)}")
-                exp_errors.append(i+1)
-            else:
-                if details:
-                    long_lines = [j+1 for j, ln in enumerate(details.split('\n')) if len(ln) > 1000]
-                    if long_lines:
-                        st.warning(f"⚠️ Experience {i+1}: Lines {long_lines} too long (>1000 chars)")
-                experiences.append(f"{role} at {company} ({duration})\n{details}")
-
-st.subheader("Education")
-edu_count = st.number_input("Number of education entries", 0, 5, 1)
-educations, edu_errors = [], []
-
-for i in range(edu_count):
-    with st.expander(f"Education {i+1}", expanded=(i==0)):
-        col1, col2 = st.columns(2)
-        with col1:
-            degree = st.text_input("Degree", key=f"deg_{i}")
-            institution = st.text_input("Institution", key=f"inst_{i}")
-        with col2:
-            year = st.text_input("Year", key=f"yr_{i}")
-        
-        if any([degree, institution, year]):
-            missing = []
-            if not degree: missing.append("Degree")
-            if not institution: missing.append("Institution")
-            if not year: missing.append("Year")
+            # Display skills in a nice format
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                # Display skills as tags
+                skills_html = ""
+                for skill in result["skills"]:
+                    skills_html += f'<span style="background-color: #e0e7ff; color: #3730a3; padding: 5px 10px; margin: 3px; border-radius: 15px; display: inline-block; font-size: 14px;">{skill}</span> '
+                st.markdown(skills_html, unsafe_allow_html=True)
             
-            if missing:
-                st.error(f"🔴 Education {i+1}: Missing {', '.join(missing)}")
-                edu_errors.append(i+1)
-            else:
-                if len(degree) > 1000:
-                    st.warning(f"⚠️ Education {i+1}, Degree: {len(degree)} chars. Keep under 1000")
-                if len(institution) > 1000:
-                    st.warning(f"⚠️ Education {i+1}, Institution: {len(institution)} chars. Keep under 1000")
-                educations.append(f"{degree} - {institution} ({year})")
-
-if st.button("🚀 Generate Resume", type="primary", use_container_width=True):
-    if not all([name, email, phone, summary, skills]):
-        st.error("❌ Fill all required fields marked with *")
-    elif exp_errors or edu_errors:
-        st.error(f"❌ Fix errors in: Experience {exp_errors}, Education {edu_errors}")
-    else:
-        try:
-            data = ResumeData(name=name, email=email, phone=phone, summary=summary, 
-                            skills=skills, experience="\n\n".join(experiences) if experiences else "No experience",
-                            education="\n".join(educations) if educations else "No education")
-            
-            with st.spinner("Generating..."):
-                resume_text = generate_resume(data, jd=jd)
-                print(resume_text)
-                pdf_output, error_line, error_text = create_pdf_safe(resume_text)
-                print(f"PDF Output: {pdf_output}, Error Line: {error_line}, Error Text: {error_text}")
-
-                
-                if pdf_output:
-                    st.session_state.resume_pdf = pdf_output
-                    st.session_state.resume_name = f"{name.replace(' ', '_')}_resume.pdf"
-                    st.success("✅ Resume generated!")
-                    st.download_button("📥 Download PDF", pdf_output, file_name=st.session_state.resume_name,
-                                     mime="application/pdf", use_container_width=True)
-                    with st.expander("👁️ Preview"):
-                        st.text(resume_text)
-                else:
-                    st.error(f"🔴 PDF Error at Line {error_line}: {error_text[:60] if error_text else 'Unknown'}...")
-                    if error_text and "EXPERIENCE" in resume_text[:resume_text.find(error_text)]:
-                        st.warning("⚠️ Issue is in **Experience Section**")
-                    elif error_text and "EDUCATION" in resume_text[:resume_text.find(error_text)]:
-                        st.warning("⚠️ Issue is in **Education Section**")
-                    st.info("💡 Fix: Break this line into multiple shorter lines (under 1000 characters)")
-                    
-        except ValidationError as ve:
-            for error in ve.errors():
-                st.error(f"❌ {error['loc'][0]}: {error['msg']}")
-        except Exception as e:
-            st.error(f"❌ Error: {str(e)}")
-
-if st.session_state.resume_pdf:
-    st.divider()
-    st.subheader("📧 Email Resume")
-    recipient = st.text_input("Recipient Email")
-    
-    if st.button("📨 Send Email", use_container_width=True):
-        if not recipient:
-            st.error("❌ Enter email")
-        elif not settings.SENDER_EMAIL or not settings.SENDER_PASSWORD:
-            st.error("❌ Add SENDER_EMAIL & SENDER_PASSWORD to .env")
+            with col2:
+                if st.button("✨ Use These Skills", type="primary", use_container_width=True):
+                    # KEY FIX: Update the actual widget's session state key directly
+                    st.session_state.f1_skills = result["formatted"]
+                    st.session_state.skills_used = True
+                    st.rerun()  # Force immediate update
         else:
+            st.error(result.get("text", "Could not generate suggestions"))
+
+st.divider()
+
+# Feature Selection
+tab1, tab2, tab3 = st.tabs(["📝 Build Resume", "🎯 ATS Checker", "⚡ Quick Optimize"])
+
+# Feature 1: Standard Resume Builder (NO JD FIELD)
+with tab1:
+    st.subheader("Build Resume from Scratch")
+    
+    # Show success message if skills were just added
+    if st.session_state.skills_used:
+        st.success("✅ Skills have been auto-filled in the Skills field below! You can edit them if needed.")
+        st.session_state.skills_used = False  # Reset after showing
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        name = st.text_input("Name*", key="f1_name", placeholder="John Doe")
+        email = st.text_input("Email*", key="f1_email", placeholder="john.doe@example.com")
+        phone = st.text_input("Phone* (10 digits)", key="f1_phone", placeholder="1234567890")
+    with col2:
+        summary = st.text_area(
+            "Professional Summary*", 
+            height=100, 
+            key="f1_summary",
+            placeholder="Brief summary of your professional background and career objectives..."
+        )
+    
+    # Skills field - controlled by session state key only (NO value parameter)
+    skills = st.text_area(
+        "Skills*", 
+        height=80, 
+        key="f1_skills",  # This key directly controls the content
+        placeholder="e.g., Python, JavaScript, React, AWS, Machine Learning, Data Analysis..."
+    )
+    
+    experience = st.text_area(
+        "Work Experience*", 
+        height=120, 
+        key="f1_exp", 
+        placeholder="Software Engineer at ABC Company (Jan 2020 - Present)\n• Developed and maintained web applications\n• Led a team of 3 developers\n• Improved system performance by 40%"
+    )
+    
+    education = st.text_area(
+        "Education*", 
+        height=80, 
+        key="f1_edu", 
+        placeholder="Bachelor of Science in Computer Science\nXYZ University (2016 - 2020)\nGPA: 3.8/4.0"
+    )
+    
+    st.info("ℹ️ All fields are required. Education and Experience must be different.")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🚀 Generate Resume", type="primary", use_container_width=True):
+            # Validate all required fields are filled
+            if not all([name, email, phone, summary, skills, experience, education]):
+                st.error("❌ Please fill all required fields marked with *")
+            else:
+                try:
+                    # Create ResumeData object - validation happens here
+                    data = ResumeData(
+                        name=name, 
+                        email=email, 
+                        phone=phone, 
+                        summary=summary, 
+                        skills=skills, 
+                        experience=experience, 
+                        education=education
+                    )
+                    
+                    with st.spinner("Generating your professional resume..."):
+                        resume_text = generate_resume(data, jd=None)
+                        pdf_output = create_pdf_safe(resume_text)
+                        st.session_state.resume_pdf = pdf_output
+                        st.session_state.resume_filename = f"{name.replace(' ', '_')}_resume.pdf"
+                        st.success("✅ Resume generated successfully!")
+                        st.download_button(
+                            "📥 Download Resume", 
+                            pdf_output, 
+                            file_name=st.session_state.resume_filename, 
+                            mime="application/pdf",
+                            use_container_width=True
+                        )
+                except ValueError as e:
+                    st.error(f"❌ Validation Error: {str(e)}")
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)}")
+    
+    with col2:
+        if 'resume_pdf' in st.session_state:
+            st.write("**📧 Email Your Resume**")
+            recipient = st.text_input("Recipient Email:", key="f1_recipient", placeholder="recruiter@company.com")
+            if st.button("📨 Send Email", use_container_width=True):
+                if recipient:
+                    try:
+                        send_email(recipient, st.session_state.resume_pdf, st.session_state.resume_filename, name)
+                        st.success(f"✅ Resume sent to {recipient}!")
+                    except Exception as e:
+                        st.error(f"❌ Email Error: {str(e)}")
+                else:
+                    st.warning("⚠️ Please enter recipient email")
+
+# Feature 2: ATS Checker
+with tab2:
+    st.subheader("Check ATS Score & Get Suggestions")
+    resume_text = st.text_area("Paste your resume text here", height=300, key="f2_resume")
+    jd_text = st.text_area("Job Description (optional)", height=100, key="f2_jd")
+    
+    if st.button("🎯 Analyze ATS Score", type="primary", use_container_width=True):
+        if resume_text:
+            with st.spinner("Analyzing..."):
+                score = rag_service.calculate_ats_score(resume_text, jd_text if jd_text else None)
+                suggestions = rag_service.get_ats_suggestions(resume_text)
+                
+                col1, col2 = st.columns([1, 2])
+                with col1:
+                    st.metric("ATS Score", f"{score}/100")
+                    if score >= 80:
+                        st.success("Excellent!")
+                    elif score >= 60:
+                        st.warning("Good, can improve")
+                    else:
+                        st.error("Needs improvement")
+                
+                with col2:
+                    st.write("**💡 Suggestions:**")
+                    for suggestion in suggestions:
+                        st.write(f"• {suggestion}")
+        else:
+            st.error("❌ Paste resume text")
+
+# Feature 3: Quick Optimize (Resume + JD → PDF)
+with tab3:
+    st.subheader("Optimize Existing Resume with Job Description")
+    existing_resume = st.text_area("Paste your existing resume", height=200, key="f3_resume")
+    target_jd = st.text_area("Paste Job Description*", height=150, key="f3_jd")
+    
+    if st.button("⚡ Optimize & Download", type="primary", use_container_width=True):
+        if existing_resume and target_jd:
             try:
-                msg = MIMEMultipart()
-                msg['From'] = settings.SENDER_EMAIL
-                msg['To'] = recipient
-                msg['Subject'] = f"Resume - {name}"
-                msg.attach(MIMEText(f"Resume for {name}", 'plain'))
-                
-                part = MIMEBase('application', 'octet-stream')
-                part.set_payload(st.session_state.resume_pdf)
-                encoders.encode_base64(part)
-                part.add_header('Content-Disposition', f'attachment; filename={st.session_state.resume_name}')
-                msg.attach(part)
-                
-                server = smtplib.SMTP(settings.SMTP_SERVER, settings.SMTP_PORT)
-                server.starttls()
-                server.login(settings.SENDER_EMAIL, settings.SENDER_PASSWORD)
-                server.send_message(msg)
-                server.quit()
-                st.success(f"✅ Sent to {recipient}!")
+                with st.spinner("Optimizing with RAG..."):
+                    # Extract basic info (simplified)
+                    lines = existing_resume.split('\n')
+                    name = lines[0] if lines else "Candidate"
+                    
+                    # Get RAG-enhanced suggestions
+                    relevant_context = rag_service.get_relevant_skills(target_jd)
+                    
+                    # Create optimized resume
+                    data = ResumeData(
+                        name=name, email="email@example.com", phone="1234567890",
+                        summary=existing_resume[:200], skills=relevant_context[:200],
+                        experience=existing_resume, education="See resume"
+                    )
+                    optimized_text = generate_resume(data, jd=target_jd)
+                    pdf_output = create_pdf_safe(optimized_text)
+                    
+                    st.success("✅ Optimized!")
+                    st.download_button("📥 Download Optimized Resume", pdf_output, 
+                                     file_name="optimized_resume.pdf", mime="application/pdf")
+                    
+                    with st.expander("👁️ Preview"):
+                        st.text(optimized_text[:500] + "...")
             except Exception as e:
                 st.error(f"❌ {str(e)}")
+        else:
+            st.error("❌ Provide both resume and JD")

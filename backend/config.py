@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """Application settings - ignores extra fields in .env"""
     GOOGLE_API_KEY: str = ""  
-    EMBEDDING_MODEL_NAME: str = "models/embedding-001"  
+    EMBEDDING_MODEL_NAME: str = "models/embedding-001"   
     SMTP_SERVER: str = "smtp.gmail.com"
     SMTP_PORT: int = 587
     SENDER_EMAIL: str = ""
@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", 
         env_file_encoding="utf-8",
-        extra="ignore",  # Ignore extra fields that aren't defined here
+        extra="ignore",  
         case_sensitive=False
     )
 
